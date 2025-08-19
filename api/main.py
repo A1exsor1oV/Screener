@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# FastAPI + MOEX ISS provider (real data, futures on RFUD)
+# FastAPI + MOEX ISS provider (real data, robust futures resolver + history fallback)
 import os, json, asyncio, time
 from datetime import datetime, timezone
 from typing import Dict, Optional, List, Any
@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 SYMBOLS_FILE = os.path.join(os.path.dirname(__file__), "symbols.json")
 
-app = FastAPI(title="Screener API", version="0.7.0")
+app = FastAPI(title="Screener API", version="0.8.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -22,10 +22,10 @@ app.add_middleware(
 HTTP_TIMEOUT = 12.0
 REFRESH_SEC = 5.0
 DIV_REFRESH_SEC = 3600.0
-PREFER_YEAR_DEC = 2025
+PREFER_YEAR_DEC = 2025        # целевой год (12.25)
 TRY_YEARS_AHEAD = 1
-MONTHS_ORDER = [12, 9, 6, 3]      # приоритет серий
-FUT_BOARD = "RFUD"                # доска срочного рынка
+MONTHS_ORDER = [12, 9, 6, 3]  # приоритет серий
+FUT_BOARD = "RFUD"            # базовая доска срочного рынка
 
 # Акция -> root на FORTS
 FUT_ROOT: Dict[str, str] = {
@@ -35,10 +35,10 @@ FUT_ROOT: Dict[str, str] = {
     "MOEX": "MOEX",
     "PLZL": "PLZL",
     "X5":   "FIVE",
-    # при необходимости дополняй: "PHOR":"PHOR", "TATN":"TATN", ...
+    # добавляй по мере необходимости
 }
 
-# ------------------------------- тикеры --------------------------------------
+# ------------------------------- загрузка тикеров -----------------------------
 def load_symbols() -> list[str]:
     try:
         with open(SYMBOLS_FILE, "r", encoding="utf-8") as f:
@@ -71,23 +71,34 @@ class ScreenerRow(BaseModel):
 
 # ------------------------------- кэш -----------------------------------------
 CACHE: Dict[str, dict] = {
-    "shares": {},
-    "futs": {},
-    "divs": {},
-    "map_ui_code": {},
-    "map_fut_secid": {},
-    "debug_fut": {},
+    "shares": {},          # { 'SBER': {'last': 317.62, 'ts': ...}, ... }
+    "futs": {},            # { 'SBRF-12.25': {'last': 319.1, 'exp': '2025-12-19', 'ts': ...}, ... }
+    "divs": {},            # { 'SBER': {'ex_date': '2025-10-01', 'value': 18.7, 'ts': ...}, ... }
+    "map_ui_code": {},     # { 'SBER': 'SBER-12.25', ... }
+    "map_fut_secid": {},   # { 'SBER': 'SBRF-12.25', ... }  # (или буквенный форм-фактор)
+    "debug_fut": {},       # отладка по поиску серий/цен
 }
 
 # ------------------------------- ISS helpers ---------------------------------
-def _now_ts() -> float: return time.time()
+def _now_ts() -> float:
+    return time.time()
 
 async def _get(client: httpx.AsyncClient, url: str) -> dict:
-    r = await client.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "screener/0.7"})
+    r = await client.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "screener/0.8"})
     r.raise_for_status()
     return r.json()
 
-def _mm_yy(mm: int, year: int) -> str: return f"{mm:02d}.{str(year)[-2:]}"
+# ------------------------------- утилиты --------------------------------------
+def _is_future_date(iso: str) -> bool:
+    try:
+        d = datetime.fromisoformat(str(iso)).date()
+        return d >= datetime.now(timezone.utc).date()
+    except Exception:
+        return False
+
+def _mm_yy(mm: int, year: int) -> str:
+    return f"{mm:02d}.{str(year)[-2:]}"
+
 LETTER_FOR_MONTH = {3: "H", 6: "M", 9: "U", 12: "Z"}
 
 # ------------------------------- акции ---------------------------------------
@@ -137,72 +148,101 @@ async def fetch_dividend_info(client: httpx.AsyncClient, secid: str) -> dict:
         pass
     return out
 
-# --- utils
-def _is_future_date(iso: str) -> bool:
+# ------------------------------- MARKETDATA (цены фьючерса) ------------------
+async def _marketdata_row(client: httpx.AsyncClient, url: str):
     try:
-        d = datetime.fromisoformat(str(iso)).date()
-        return d >= datetime.now(timezone.utc).date()
+        js = await _get(client, url)
+        cols = js.get("marketdata", {}).get("columns", [])
+        data = js.get("marketdata", {}).get("data", [])
+        if not cols or not data:
+            return None
+        return {"cols": cols, "row": data[0]}
     except Exception:
-        return False
+        return None
 
-# --- берём цену с фолбэками, пробуем с RFUD и без
-async def _md_price_any(client: httpx.AsyncClient, secid: str) -> Optional[float]:
-    # 1) с RFUD
-    url1 = (
-        "https://iss.moex.com/iss/engines/futures/markets/forts/boards/RFUD/"
-        f"securities/{secid}.json?iss.meta=off&marketdata.columns=LAST,LCURRENTPRICE,BID,ASK"
-    )
-    # 2) без boards (иногда marketdata тут)
-    url2 = (
-        "https://iss.moex.com/iss/engines/futures/markets/forts/"
-        f"securities/{secid}.json?iss.meta=off&marketdata.columns=LAST,LCURRENTPRICE,BID,ASK"
-    )
-    for url in (url1, url2):
-        try:
-            js = await _get(client, url)
-            md = js.get("marketdata", {}).get("data", [])
-            if not md or not md[0]:
-                continue
-            last, lcur, bid, ask = md[0][0], md[0][1], md[0][2], md[0][3]
-            if last is not None:
-                return float(last)
-            if lcur is not None:
-                return float(lcur)
-            if bid is not None and ask is not None:
-                return (float(bid) + float(ask)) / 2.0
-        except Exception:
-            continue
+def _pick_price_from_row(row: dict):
+    cols = {n: i for i, n in enumerate(row["cols"])}
+    r = row["row"]
+    def val(name: str):
+        i = cols.get(name)
+        if i is None: return None
+        v = r[i]
+        return float(v) if v is not None else None
+    # приоритеты
+    for name in ("LAST", "LCURRENTPRICE"):
+        p = val(name)
+        if p is not None: return p
+    bid, ask = val("BID"), val("ASK")
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2.0
+    for name in ("MARKETPRICE", "MARKETPRICETODAY"):
+        p = val(name)
+        if p is not None: return p
     return None
 
+async def _md_price_any(client: httpx.AsyncClient, secid: str, dbg_list: list) -> Optional[float]:
+    urls = [
+        f"https://iss.moex.com/iss/engines/futures/markets/forts/boards/{FUT_BOARD}/securities/{secid}.json?iss.meta=off&marketdata.columns=LAST,LCURRENTPRICE,BID,ASK,MARKETPRICE,MARKETPRICETODAY",
+        f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{secid}.json?iss.meta=off&marketdata.columns=LAST,LCURRENTPRICE,BID,ASK,MARKETPRICE,MARKETPRICETODAY",
+    ]
+    for u in urls:
+        row = await _marketdata_row(client, u)
+        price = _pick_price_from_row(row) if row else None
+        dbg_list.append({"secid": secid, "where": "marketdata", "url": u, "price": price, "cols": row["cols"] if row else None})
+        if price is not None:
+            return price
+    return None
+
+# ------------------------------- EXPIRATION ----------------------------------
 async def _sec_exp_any(client: httpx.AsyncClient, secid: str) -> Optional[str]:
-    url1 = (
-        "https://iss.moex.com/iss/engines/futures/markets/forts/boards/RFUD/"
-        f"securities/{secid}.json?iss.meta=off&securities.columns=SECID,EXPIRATION"
-    )
-    url2 = (
-        "https://iss.moex.com/iss/engines/futures/markets/forts/"
-        f"securities/{secid}.json?iss.meta=off&securities.columns=SECID,EXPIRATION"
-    )
-    for url in (url1, url2):
+    urls = [
+        f"https://iss.moex.com/iss/engines/futures/markets/forts/boards/{FUT_BOARD}/securities/{secid}.json?iss.meta=off&securities.columns=SECID,EXPIRATION",
+        f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{secid}.json?iss.meta=off&securities.columns=SECID,EXPIRATION",
+    ]
+    for u in urls:
         try:
-            js = await _get(client, url)
+            js = await _get(client, u)
             cols = js.get("securities", {}).get("columns", [])
             data = js.get("securities", {}).get("data", [])
             if cols and data:
                 c = {n: i for i, n in enumerate(cols)}
-                if data and data[0]:
-                    return data[0][c["EXPIRATION"]]
+                return data[0][c["EXPIRATION"]]
         except Exception:
-            continue
+            pass
     return None
 
-# --- список серий через query=<root>
+# ------------------------------- HISTORY fallback ----------------------------
+async def _history_close_any(client: httpx.AsyncClient, secid: str, days_back: int = 5):
+    base = datetime.now(timezone.utc).date()
+    for d in range(days_back + 1):
+        day = base if d == 0 else (base.fromordinal(base.toordinal() - d))
+        day_iso = day.isoformat()
+        urls = [
+            f"https://iss.moex.com/iss/history/engines/futures/markets/forts/boards/{FUT_BOARD}/securities/{secid}.json?iss.meta=off&date={day_iso}&history.columns=SECID,LEGALCLOSEPRICE,CLOSE",
+            f"https://iss.moex.com/iss/history/engines/futures/markets/forts/securities/{secid}.json?iss.meta=off&date={day_iso}&history.columns=SECID,LEGALCLOSEPRICE,CLOSE",
+        ]
+        for u in urls:
+            try:
+                js = await _get(client, u)
+                cols = js.get("history", {}).get("columns", [])
+                data = js.get("history", {}).get("data", [])
+                if cols and data:
+                    c = {n: i for i, n in enumerate(cols)}
+                    for row in reversed(data):
+                        lc_i = c.get("LEGALCLOSEPRICE"); cl_i = c.get("CLOSE")
+                        lc = row[lc_i] if lc_i is not None else None
+                        cl = row[cl_i] if cl_i is not None else None
+                        price = lc or cl
+                        if price is not None:
+                            return float(price), {"where": "history", "url": u, "date": day_iso}
+            except Exception:
+                continue
+    return None, None
+
+# ------------------------------- список серий --------------------------------
 async def _list_series_by_query(client: httpx.AsyncClient, root: str) -> list[dict]:
-    url = (
-        "https://iss.moex.com/iss/engines/futures/markets/forts/"
-        "securities.json?iss.meta=off&limit=5000&securities.columns=SECID,EXPIRATION&query="
-        + root
-    )
+    url = ("https://iss.moex.com/iss/engines/futures/markets/forts/"
+           "securities.json?iss.meta=off&limit=5000&securities.columns=SECID,EXPIRATION&query=" + root)
     try:
         js = await _get(client, url)
         cols = js.get("securities", {}).get("columns", [])
@@ -213,125 +253,71 @@ async def _list_series_by_query(client: httpx.AsyncClient, root: str) -> list[di
         out = []
         for row in data:
             secid = row[c["SECID"]]
-            exp = row[c["EXPIRATION"]]
-            if not isinstance(secid, str):
-                continue
-            # отбираем только наши root-ы и будущие серии
-            if not secid.startswith(root):
+            exp   = row[c["EXPIRATION"]]
+            if not isinstance(secid, str) or not secid.startswith(root):
                 continue
             if not exp or not _is_future_date(exp):
                 continue
             out.append({"secid": secid, "exp": exp})
-        # ближайшие вперёд
         out.sort(key=lambda x: x["exp"])
         return out
     except Exception:
         return []
-    
-# ------------------------------- фьючерсы (RFUD) ------------------------------
-async def _md_price(client: httpx.AsyncClient, secid: str) -> Optional[float]:
-    # цена с fallback: LAST → LCURRENTPRICE → mid(BID,ASK)
-    url = (
-        "https://iss.moex.com/iss/engines/futures/markets/forts/boards/"
-        f"{FUT_BOARD}/securities/{secid}.json"
-        "?iss.meta=off&marketdata.columns=LAST,LCURRENTPRICE,BID,ASK"
-    )
-    try:
-        js = await _get(client, url)
-        md = js.get("marketdata", {}).get("data", [])
-        if not md or not md[0]:
-            return None
-        last, lcur, bid, ask = md[0][0], md[0][1], md[0][2], md[0][3]
-        if last is not None:
-            return float(last)
-        if lcur is not None:
-            return float(lcur)
-        if bid is not None and ask is not None:
-            return (float(bid) + float(ask)) / 2.0
-    except Exception:
-        pass
-    return None
 
-async def _sec_exp(client: httpx.AsyncClient, secid: str) -> Optional[str]:
-    url = (
-        "https://iss.moex.com/iss/engines/futures/markets/forts/boards/"
-        f"{FUT_BOARD}/securities/{secid}.json?iss.meta=off&securities.columns=SECID,EXPIRATION"
-    )
-    try:
-        js = await _get(client, url)
-        cols = js.get("securities", {}).get("columns", [])
-        data = js.get("securities", {}).get("data", [])
-        if cols and data:
-            c = {n: i for i, n in enumerate(cols)}
-            if data and data[0]:
-                return data[0][c["EXPIRATION"]]
-    except Exception:
-        pass
-    return None
-
-async def resolve_series_for_share(
-    client: httpx.AsyncClient,
-    share: str,
-    prefer_year: int = PREFER_YEAR_DEC
-) -> dict:
+# ------------------------------- резолвер серии -------------------------------
+async def resolve_series_for_share(client: httpx.AsyncClient, share: str, prefer_year: int = PREFER_YEAR_DEC) -> dict:
     root = FUT_ROOT.get(share)
     dbg: list[dict] = []
     if not root:
         return {"secid": None, "ui_code": f"{share}-", "exp": None, "last": None, "tried": dbg}
 
-    # 1) получаем реальные серии из списка по query=root
+    # (A) реальные серии из списка
     series = await _list_series_by_query(client, root)
-    # приоритет: декабрь prefer_year, иначе квартальные 12/9/6/3 ближайшие
     chosen = None
     if series:
-        # exact декабрь prefer_year
-        want_dec_suffix = f"-12.{str(prefer_year)[-2:]}"
-        chosen = next((s for s in series if s["secid"].endswith(want_dec_suffix)), None)
+        # приоритет — декабрь prefer_year, иначе ближайшая квартальная
+        want = f"-12.{str(prefer_year)[-2:]}"
+        chosen = next((s for s in series if isinstance(s["secid"], str) and s["secid"].endswith(want)), None)
         if not chosen:
-            # ближайшая квартальная вперёд
-            def mm_of(s): 
-                try:
-                    # SECID может быть ROOT-12.25 или ROOTZ5; если с дефисом — возьмём месяц из него
-                    part = s["secid"].split("-")[1] if "-" in s["secid"] else ""
-                    return int(part.split(".")[0]) if part else 0
-                except Exception:
-                    return 0
-            q = [s for s in series if mm_of(s) in (3, 6, 9, 12)]
+            def mm_from_secid(sec: str) -> int:
+                if "-" in sec:
+                    try: return int(sec.split("-")[1].split(".")[0])
+                    except: return 0
+                return 0
+            q = [s for s in series if mm_from_secid(str(s["secid"])) in (3,6,9,12)]
             chosen = q[0] if q else series[0]
 
-    # 2) если через список не нашли — брутфорс по нашим шаблонам (как раньше)
+    # (B) если через список не нашли — брутфорс по шаблонам (dash → letter), 2 года
     if not chosen:
-        months = [12, 9, 6, 3]
-        for year in (prefer_year, prefer_year + 1):
-            for mm in months:
-                secid = f"{root}-{_mm_yy(mm, year)}"
-                price = await _md_price_any(client, secid)
-                dbg.append({"secid": secid, "fmt": "dash", "last": price})
-                if price is not None:
-                    exp = await _sec_exp_any(client, secid)
-                    ui = f"{share}-{_mm_yy(mm, year)}"
-                    return {"secid": secid, "ui_code": ui, "exp": exp, "last": price, "tried": dbg}
-            # буквенный
+        for year in (prefer_year, prefer_year + TRY_YEARS_AHEAD):
             y1 = str(year)[-1]
-            for mm in months:
-                letter = LETTER_FOR_MONTH[mm]
-                secid = f"{root}{letter}{y1}"
-                price = await _md_price_any(client, secid)
-                dbg.append({"secid": secid, "fmt": "letter", "last": price})
+            for mm in MONTHS_ORDER:
+                secid = f"{root}-{_mm_yy(mm, year)}"
+                price = await _md_price_any(client, secid, dbg)
                 if price is not None:
                     exp = await _sec_exp_any(client, secid)
-                    ui = f"{share}-{_mm_yy(mm, year)}"
-                    return {"secid": secid, "ui_code": ui, "exp": exp, "last": price, "tried": dbg}
-
+                    return {"secid": secid, "ui_code": f"{share}-{_mm_yy(mm, year)}", "exp": exp, "last": price, "tried": dbg}
+            for mm in MONTHS_ORDER:
+                letter = LETTER_FOR_MONTH[mm]
+                secid  = f"{root}{letter}{y1}"
+                price  = await _md_price_any(client, secid, dbg)
+                if price is not None:
+                    exp = await _sec_exp_any(client, secid)
+                    return {"secid": secid, "ui_code": f"{share}-{_mm_yy(mm, year)}", "exp": exp, "last": price, "tried": dbg}
         return {"secid": None, "ui_code": f"{share}-", "exp": None, "last": None, "tried": dbg}
 
-    # 3) для найденной серии — цена и UI‑код
+    # (C) выбрана реальная серия → цена (marketdata) с фолбэком в history
     secid = chosen["secid"]
-    exp = chosen["exp"]
-    price = await _md_price_any(client, secid)
-    dbg.append({"secid": secid, "fmt": "query", "last": price})
-    # ui: если в secid есть дефис — используем MM.YY из него; иначе из даты EXPIRATION
-    if "-" in secid:
+    exp   = chosen["exp"]
+    price = await _md_price_any(client, secid, dbg)
+    if price is None:
+        hprice, hdbg = await _history_close_any(client, secid, days_back=5)
+        if hprice is not None:
+            price = hprice
+            dbg.append({"secid": secid, **(hdbg or {}), "price": price})
+
+    # UI‑код
+    if isinstance(secid, str) and "-" in secid:
         mm_yy = secid.split("-")[1]
     else:
         try:
@@ -339,8 +325,8 @@ async def resolve_series_for_share(
             mm_yy = _mm_yy(dt.month, dt.year)
         except Exception:
             mm_yy = "??.??"
-    ui = f"{share}-{mm_yy}"
-    return {"secid": secid, "ui_code": ui, "exp": exp, "last": price, "tried": dbg}
+
+    return {"secid": secid, "ui_code": f"{share}-{mm_yy}", "exp": exp, "last": price, "tried": dbg}
 
 # ------------------------------- refresh cache --------------------------------
 async def refresh_cache():
@@ -470,6 +456,22 @@ async def ws_screener(ws: WebSocket):
 def get_symbols():
     return SYMBOLS
 
+# ------------------------------- DEBUG ----------------------------------------
 @app.get("/debug/futures")
 def debug_futures():
     return CACHE.get("debug_fut", {})
+
+@app.get("/debug/peek/{secid}")
+async def debug_peek(secid: str):
+    async with httpx.AsyncClient() as client:
+        dbg: List[dict] = []
+        price = await _md_price_any(client, secid, dbg)
+        exp = await _sec_exp_any(client, secid)
+        hclose, hdbg = await _history_close_any(client, secid, days_back=5)
+        return {
+            "secid": secid,
+            "exp": exp,
+            "marketdata_attempts": dbg,
+            "history": {"close": hclose, "meta": hdbg},
+            "picked_price": price or hclose,
+        }
