@@ -38,6 +38,43 @@ FUT_ROOT: Dict[str, str] = {
     # добавляй по мере необходимости
 }
 
+# ------------- нормализация: UI "AAA-12.25" -> SECID "ROOTZ5" -----------------
+MONTH_TO_LETTER = {3: "H", 6: "M", 9: "U", 12: "Z"}
+
+def _normalize_to_letter_secid(token: str) -> str:
+    """
+    Принимаем:
+      - правильный SECID (например 'SBRFZ5') -> вернём как есть
+      - UI-код вида 'SBER-12.25' -> маппим через FUT_ROOT: 'SBER' -> 'SBRF' + 'Z5' => 'SBRFZ5'
+      - фьючи типа 'Si-12.25' -> считаем 'Si' уже root => 'SiZ5'
+    """
+    t = (token or "").strip()
+    if not t:
+        return t
+    # если уже SECID в буквенном виде — оставим
+    if "-" not in t and len(t) >= 3 and t[-1].isdigit() and t[-2].isalpha():
+        return t  # например 'SBRFZ5', 'SiU5'
+
+    if "-" in t:
+        prefix, tail = t.split("-", 1)  # 'SBER' + '12.25'
+        mm_yy = tail.strip()
+        try:
+            mm = int(mm_yy.split(".")[0])
+            yy = int(mm_yy.split(".")[1])
+        except Exception:
+            return t  # не распарсили — вернём как есть
+
+        letter = MONTH_TO_LETTER.get(mm)
+        if not letter:
+            return t
+
+        # если это акция — берём её root из FUT_ROOT, иначе считаем prefix уже root'ом
+        root = FUT_ROOT.get(prefix, prefix)
+        y1 = str(yy)[-1]
+        return f"{root}{letter}{y1}"
+
+    return t
+
 # ------------------------------- загрузка тикеров -----------------------------
 def load_symbols() -> list[str]:
     try:
@@ -156,6 +193,7 @@ async def _marketdata_row(client: httpx.AsyncClient, url: str):
         data = js.get("marketdata", {}).get("data", [])
         if not cols or not data:
             return None
+        # ищем строку по secid (в per-sequrity она одна, а в batch их может быть несколько)
         return {"cols": cols, "row": data[0]}
     except Exception:
         return None
@@ -168,7 +206,6 @@ def _pick_price_from_row(row: dict):
         if i is None: return None
         v = r[i]
         return float(v) if v is not None else None
-    # приоритеты
     for name in ("LAST", "LCURRENTPRICE"):
         p = val(name)
         if p is not None: return p
@@ -180,21 +217,53 @@ def _pick_price_from_row(row: dict):
         if p is not None: return p
     return None
 
+
 async def _md_price_any(client: httpx.AsyncClient, secid: str, dbg_list: list) -> Optional[float]:
-    urls = [
+    # 1) per-security (boards/RFUD и без boards)
+    secid = _normalize_to_letter_secid(secid)
+    urls_per = [
         f"https://iss.moex.com/iss/engines/futures/markets/forts/boards/{FUT_BOARD}/securities/{secid}.json?iss.meta=off&marketdata.columns=LAST,LCURRENTPRICE,BID,ASK,MARKETPRICE,MARKETPRICETODAY",
         f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{secid}.json?iss.meta=off&marketdata.columns=LAST,LCURRENTPRICE,BID,ASK,MARKETPRICE,MARKETPRICETODAY",
     ]
-    for u in urls:
+    for u in urls_per:
         row = await _marketdata_row(client, u)
         price = _pick_price_from_row(row) if row else None
-        dbg_list.append({"secid": secid, "where": "marketdata", "url": u, "price": price, "cols": row["cols"] if row else None})
+        dbg_list.append({"secid": secid, "where": "marketdata:per", "url": u, "price": price, "cols": (row or {}).get("cols")})
         if price is not None:
             return price
+
+    # 2) batch endpoint с параметром securities= (часто работает, когда per-security пустой)
+    urls_batch = [
+        f"https://iss.moex.com/iss/engines/futures/markets/forts/boards/{FUT_BOARD}/securities.json?iss.meta=off&securities={secid}&marketdata.columns=SECID,LAST,LCURRENTPRICE,BID,ASK,MARKETPRICE,MARKETPRICETODAY",
+        f"https://iss.moex.com/iss/engines/futures/markets/forts/securities.json?iss.meta=off&securities={secid}&marketdata.columns=SECID,LAST,LCURRENTPRICE,BID,ASK,MARKETPRICE,MARKETPRICETODAY",
+    ]
+    for u in urls_batch:
+        try:
+            js = await _get(client, u)
+            cols = js.get("marketdata", {}).get("columns", [])
+            data = js.get("marketdata", {}).get("data", [])
+            price = None
+            if cols and data:
+                c = {n: i for i, n in enumerate(cols)}
+                # в batch первая колонка — SECID. найдём именно нужный
+                for row in data:
+                    if c.get("SECID") is not None and row[c["SECID"]] != secid:
+                        continue
+                    # собираем "псевдо‑row" чтобы переиспользовать _pick_price_from_row
+                    pseudo = {"cols": [k for k in cols if k != "SECID"], "row": [v for i, v in enumerate(row) if cols[i] != "SECID"]}
+                    price = _pick_price_from_row(pseudo)
+                    break
+            dbg_list.append({"secid": secid, "where": "marketdata:batch", "url": u, "price": price, "cols": cols})
+            if price is not None:
+                return price
+        except Exception:
+            continue
+
     return None
 
 # ------------------------------- EXPIRATION ----------------------------------
 async def _sec_exp_any(client: httpx.AsyncClient, secid: str) -> Optional[str]:
+    secid = _normalize_to_letter_secid(secid)
     urls = [
         f"https://iss.moex.com/iss/engines/futures/markets/forts/boards/{FUT_BOARD}/securities/{secid}.json?iss.meta=off&securities.columns=SECID,EXPIRATION",
         f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{secid}.json?iss.meta=off&securities.columns=SECID,EXPIRATION",
@@ -213,6 +282,7 @@ async def _sec_exp_any(client: httpx.AsyncClient, secid: str) -> Optional[str]:
 
 # ------------------------------- HISTORY fallback ----------------------------
 async def _history_close_any(client: httpx.AsyncClient, secid: str, days_back: int = 5):
+    secid = _normalize_to_letter_secid(secid)
     base = datetime.now(timezone.utc).date()
     for d in range(days_back + 1):
         day = base if d == 0 else (base.fromordinal(base.toordinal() - d))
@@ -463,13 +533,15 @@ def debug_futures():
 
 @app.get("/debug/peek/{secid}")
 async def debug_peek(secid: str):
+    norm = _normalize_to_letter_secid(secid)
     async with httpx.AsyncClient() as client:
         dbg: List[dict] = []
-        price = await _md_price_any(client, secid, dbg)
-        exp = await _sec_exp_any(client, secid)
-        hclose, hdbg = await _history_close_any(client, secid, days_back=5)
+        price = await _md_price_any(client, norm, dbg)
+        exp = await _sec_exp_any(client, norm)
+        hclose, hdbg = await _history_close_any(client, norm, days_back=5)
         return {
-            "secid": secid,
+            "input": secid,
+            "normalized_secid": norm,
             "exp": exp,
             "marketdata_attempts": dbg,
             "history": {"close": hclose, "meta": hdbg},
