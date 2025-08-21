@@ -1,0 +1,1 @@
+Редактируй `futures_pool.txt` — API читает его на старте и при POST `/config/futures` перезаписывает файл.

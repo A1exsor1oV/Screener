@@ -1,0 +1,2 @@
+Скопируй stream_quotes.lua и Data250818.lua в каталог скриптов QUIK. Проверь путь к futures_pool.txt.
+Пул фьючерсов редактируется в файле ../data/futures_pool.txt — по одному SECID в строке (например SRU5).

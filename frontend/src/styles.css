@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Тёмная тема + токены */
+:root {
+  color-scheme: dark;
+  --bg: #0d0f12;
+  --panel: #14171c;
+  --panel-2: #191e26;
+  --text: #e6e8eb;
+  --muted: #a3aab6;
+  --border: #242a33;
+  --accent: #2c7be5;
+}
+html, body, #root { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); }
+
+/* Скролл */
+*::-webkit-scrollbar { height: 10px; width: 10px; }
+*::-webkit-scrollbar-thumb { background: #2a2f38; border-radius: 999px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* Каркас */
+.panel { background: linear-gradient(180deg, var(--panel), var(--panel-2)); border: 1px solid var(--border); border-radius: 18px; }
+.panel-soft { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; }
+
+/* Кнопки и инпуты */
+.btn { @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-[15px] font-medium transition; border: 1px solid var(--border); background: #1b212b; }
+.btn:hover { filter: brightness(1.06); }
+.btn-primary { background: var(--accent); border-color: transparent; color: white; }
+.input { @apply w-full rounded-xl px-3 py-2 text-[15px]; background: #11151b; border: 1px solid var(--border); color: var(--text); outline: none; }
+.input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 30%, transparent); }
+
+/* Таблица */
+.table-wrap { @apply overflow-auto rounded-xl; border: 1px solid var(--border); }
+.table { @apply min-w-full text-sm; }
+.table thead th { @apply text-left font-semibold; white-space: nowrap; padding: 10px 12px; background: #101319; position: sticky; top: 0; z-index: 1; border-bottom: 1px solid var(--border); }
+.table tbody td { white-space: nowrap; padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,.04); }
+.table tr:nth-child(odd) { background: #0e1116; }
+.table tr:nth-child(even) { background: #0c1014; }
+
+.badge { @apply rounded-full px-2.5 py-1 text-xs; background: #0f1420; border: 1px solid var(--border); color: var(--muted); }
+.hint { color: var(--muted); }
