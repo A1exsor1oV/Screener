@@ -21,3 +21,4 @@ export type ScreenerRow = {
   'Доход к эксп.(%)'?: number | null
 }
 
+
