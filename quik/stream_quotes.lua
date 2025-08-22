@@ -10,6 +10,7 @@ local TICS_FILE    = SCRIPT_DIR .. "/Data250818.lua"
 local PERIOD_MS = 1000 -- частота отправки (мс)
 -- ========================
 
+
 -- Загружаем таблицу тикеров из Data250818.lua (ожидается глобальная переменная Tic)
 local function load_tic()
   local f, err = loadfile(TICS_FILE)

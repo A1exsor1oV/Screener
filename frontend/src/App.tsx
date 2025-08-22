@@ -17,6 +17,7 @@ import {
 type IntervalMode = "3s" | "10m";
 const API = (import.meta as any).env.VITE_API_URL ?? "http://localhost:8000";
 
+
 export default function App() {
   const [rows, setRows] = useState<ScreenRow[]>([]);
   const [tickers, setTickers] = useState<string[]>(() =>
