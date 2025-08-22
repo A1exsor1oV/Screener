@@ -1,3 +1,4 @@
+/* tailwindcss */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -42,3 +43,50 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 
 .badge { @apply rounded-full px-2.5 py-1 text-xs; background: #0f1420; border: 1px solid var(--border); color: var(--muted); }
 .hint { color: var(--muted); }
+
+/* Карточка строки для мобилы */
+.card {
+  @apply rounded-xl p-3 bg-[#101319] border border-[color:var(--border)];
+}
+
+/* Grid ключ-значение: 2 колонки на мобиле, 3 на шире */
+.mobile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap: 8px 12px;
+}
+@media (min-width: 420px) {
+  .mobile-grid {
+    grid-template-columns: repeat(3, minmax(0,1fr));
+  }
+}
+
+/* Пары ключ-значение в карточке */
+.kv { display:flex; flex-direction:column; gap:2px; }
+.kv-k { font-size: 11px; letter-spacing: .02em; color: var(--muted); text-transform: uppercase; }
+.kv-v { font-size: 14px; }
+
+/* Липкая шапка таблицы уже есть (thead th sticky). Подправим тень по краю */
+.table thead::after {
+  content: "";
+  position: sticky; left: 0; right: 0; top: calc(0px + 36px);
+  height: 0; box-shadow: 0 1px 0 rgba(255,255,255,.06);
+}
+
+/* Панель действий — стеки на узких экранах */
+@media (max-width: 640px) {
+  .btn { width: 100%; }
+}
+
+/* Чуть крупнее кликабельные зоны на мобиле */
+@media (max-width: 480px) {
+  .table tbody td, .table thead th { padding: 10px; }
+}
+
+/* Чуть сгладим тень под липкой шапкой */
+.table thead th { box-shadow: inset 0 -1px 0 rgba(255,255,255,.06); }
+
+/* На узких ширинах кнопки во всю ширину для удобства тапа */
+@media (max-width: 640px) {
+  .btn { width: 100%; }
+}

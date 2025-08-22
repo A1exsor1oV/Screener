@@ -50,55 +50,105 @@ export default function App() {
   }, [tickers, pollMs]);
 
   return (
-    <div className="min-h-screen py-6 px-5">
-      <TopBar />
+    <div className="min-h-screen py-6 px-4 md:px-5">
+      <div className="mx-auto max-w-7xl px-3 sm:px-4 md:px-5 py-6">
+        <TopBar />
 
-      <div className="mt-4 grid gap-4">
-        <TradeBar />
-
-        <section className="panel p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-lg font-semibold">Котировки (демо)</div>
-            <div className="flex items-center gap-2 hint text-sm">
-              обновление по WS <span className="badge">Акции</span>
+        <div className="mt-4 grid gap-4">
+          <TradeBar />
+          <section className="panel p-3 md:p-4">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-3">
+              <div className="text-lg font-semibold">Котировки</div>
+              <div className="flex flex-wrap items-center gap-2 hint text-sm">
+                обновление: {mode === "3s" ? "каждые 3 сек" : "каждые 10 мин"}
+                <span className="badge">Акции</span>
+              </div>
             </div>
-          </div>
 
-          <div className="flex gap-2 mb-3">
-            <ColumnsButton
-              columns={columns}
-              hidden={hidden}
-              setColumns={setColumns}
-              setHidden={setHidden}
-              sensors={sensors}
-            />
-            <TickerSelect tickers={tickers} onChange={setTickers} />
-            <IntervalToggle mode={mode} onChange={setMode} />
-          </div>
+            {/* Панель действий: складывается на мобиле в колонку */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 mb-3">
+              <ColumnsButton
+                columns={columns}
+                hidden={hidden}
+                setColumns={setColumns}
+                setHidden={setHidden}
+                sensors={sensors}
+              />
+              <TickerSelect tickers={tickers} onChange={setTickers} />
+              <div className="sm:col-span-2 lg:col-span-1 sm:justify-self-end">
+                <IntervalToggle mode={mode} onChange={setMode} />
+              </div>
+            </div>
 
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  {visibleColumns.map(col => (
-                    <th key={col}>{COLUMN_LABELS[col]}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r, idx) => (
-                  <tr key={idx}>
-                    {visibleColumns.map(col => (
-                      <td key={col} className="tabular-nums">{renderCell(r, col)}</td>
+            {/* Таблица для md+ */}
+            <div className="table-wrap hidden md:block">
+              <table className="table">
+                <thead>
+                  <tr>
+                    {visibleColumns.map((col, i) => (
+                      <th
+                        key={col}
+                        className={i === 0 ? "sticky left-0 z-[2] bg-[#101319]" : undefined}
+                      >
+                        {COLUMN_LABELS[col]}
+                      </th>
                     ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+                </thead>
+                <tbody>
+                  {rows.map((r, idx) => (
+                    <tr key={idx}>
+                      {visibleColumns.map((col, i) => (
+                        <td
+                          key={col}
+                          className={`tabular-nums ${i === 0 ? "sticky left-0 z-[1] bg-[#0e1116]" : ""}`}
+                        >
+                          {renderCell(r, col)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Мобильные карточки для <md */}
+            <div className="grid gap-2 md:hidden">
+              {rows.map((r, idx) => (
+                <MobileRowCard key={idx} row={r} columns={visibleColumns} />
+              ))}
+            </div>
+          </section>
+        </div>
       </div>
     </div>
+  );
+}
+
+// ---- моб. карточка строки ----
+function MobileRowCard({row, columns}:{row: ScreenRow; columns: ColumnKey[]}) {
+  // первые 2 поля — шапка карточки, остальные — в grid
+  const titleKey = columns.find(c => c === "aktsiya") ?? columns[0];
+  const subKey   = columns.find(c => c === "fyuchers") ?? columns[1] ?? columns[0];
+
+  const rest = columns.filter(c => c !== titleKey && c !== subKey);
+
+  return (
+    <article className="card">
+      <div className="flex items-baseline justify-between">
+        <div className="text-base font-semibold">{renderCell(row, titleKey)}</div>
+        <div className="badge">{COLUMN_LABELS[subKey]}: {renderCell(row, subKey)}</div>
+      </div>
+
+      <div className="mt-2 mobile-grid">
+        {rest.map(k => (
+          <div key={k} className="kv">
+            <div className="kv-k">{COLUMN_LABELS[k]}</div>
+            <div className="kv-v tabular-nums">{renderCell(row, k)}</div>
+          </div>
+        ))}
+      </div>
+    </article>
   );
 }
 
@@ -113,20 +163,21 @@ function TopBar() {
 
 function TradeBar() {
   return (
-    <div className="panel p-4 grid grid-cols-12 gap-3">
-      <input className="input col-span-3" placeholder="SBER" defaultValue="SBER" />
-      <select className="input col-span-2">
+    <div className="panel p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3">
+      <input className="input sm:col-span-1 lg:col-span-3" placeholder="SBER" defaultValue="SBER" />
+      <select className="input sm:col-span-1 lg:col-span-2">
         <option>Buy</option>
         <option>Sell</option>
       </select>
-      <input className="input col-span-2" defaultValue={1} />
-      <input className="input col-span-3" placeholder="Limit price (опц.)" />
-      <div className="col-span-12">
+      <input className="input sm:col-span-1 lg:col-span-2" defaultValue={1} />
+      <input className="input sm:col-span-1 lg:col-span-3" placeholder="Limit price (опц.)" />
+      <div className="lg:col-span-12">
         <button className="btn btn-primary w-full">Отправить</button>
       </div>
     </div>
   );
 }
+
 
 function IntervalToggle({mode, onChange}:{mode:"3s"|"10m", onChange:(m:any)=>void}) {
   return (
